@@ -1,0 +1,19 @@
+# Data 
+data/
+*.nii
+*.nii.gz
+*.zip
+
+# Python / Environment
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Training outputs
+checkpoints/
+*.pth
