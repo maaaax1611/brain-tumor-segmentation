@@ -63,7 +63,7 @@ def criterion(logits, targets):
     dice_score = (2. * intersection + smooth) / (probs_flat.sum() + targets_flat.sum() + smooth)
     dice_loss = 1 - dice_score
     
-    return bce + dice_loss
+    return bce + (5.0 * dice_loss)
 
 def train_fn(loader, model, optimizer):
     model.train()

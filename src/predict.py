@@ -31,6 +31,7 @@ def predict_and_show():
     model.load_state_dict(state_dict)
     
     model.eval() # CRITICAL: Turns off Dropout and Batchnorm adjustment
+    #model.train() # just to experiment with BatchNorm vs. InstanceNorm
 
     # 2. Load Dataset
     ds = BraTSDataset(DATA_PATH)
