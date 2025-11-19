@@ -2,6 +2,7 @@ import os
 import argparse
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # WICHTIG: Für die Loss-Funktion
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
@@ -20,11 +21,11 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--val_split", type=float, default=0.1, help="Fraction of data to use for validation (0.0-1.0)")
+    parser.add_argument("--val_split", type=float, default=0.1, help="Fraction of data to use for validation")
     
     # Model & Data
     parser.add_argument("--model", type=str, default="unet", choices=["unet", "transformer"], help="Model architecture")
-    parser.add_argument("--data_path", type=str, default=os.path.join('data', 'MICCAI_BraTS_2019_Data_Training'), help="Path to dataset")
+    parser.add_argument("--data_path", type=str, default=os.path.join('data', 'processed_slices'), help="Path to preprocessed .npy files")
     parser.add_argument("--save_dir", type=str, default="checkpoints", help="Directory to save model checkpoints")
     
     return parser.parse_args()
@@ -45,31 +46,55 @@ def dice_coeff(pred, target):
     intersection = (pred_flat * target_flat).sum()
     return (2. * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
 
-def dice_loss(pred, target):
-    return 1 - dice_coeff(pred, target)
+def criterion(logits, targets):
+    """
+    Combined BCE + Dice Loss.
+    Takes RAW LOGITS (before sigmoid) for better numerical stability.
+    """
+    bce = F.binary_cross_entropy_with_logits(logits, targets)
+    
+    probs = torch.sigmoid(logits)
+    smooth = 1.0
+    
+    probs_flat = probs.view(-1)
+    targets_flat = targets.view(-1)
+    intersection = (probs_flat * targets_flat).sum()
+    
+    dice_score = (2. * intersection + smooth) / (probs_flat.sum() + targets_flat.sum() + smooth)
+    dice_loss = 1 - dice_score
+    
+    return bce + dice_loss
 
-def train_fn(loader, model, optimizer, scaler):
+def train_fn(loader, model, optimizer):
     model.train()
     loop = tqdm(loader, desc="Train")
     epoch_loss = 0
+    valid_batches = 0
     
     for batch_idx, (data, targets) in enumerate(loop):
         data = data.to(DEVICE)
         targets = targets.to(DEVICE)
 
-        with torch.cuda.amp.autocast():
-            predictions = torch.sigmoid(model(data))
-            loss = dice_loss(predictions, targets)
+        logits = model(data)            
+        loss = criterion(logits, targets)
+
+        if torch.isnan(loss):
+            loop.set_postfix(loss="NaN (Skipped)")
+            continue
 
         optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        loss.backward()
+        
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        optimizer.step()
 
         epoch_loss += loss.item()
+        valid_batches += 1
         loop.set_postfix(loss=loss.item())
-        
-    return epoch_loss / len(loader)
+    
+    if valid_batches == 0: return 0.0
+    return epoch_loss / valid_batches
 
 def validate_fn(loader, model):
     model.eval()
@@ -81,7 +106,9 @@ def validate_fn(loader, model):
             data = data.to(DEVICE)
             targets = targets.to(DEVICE)
             
-            predictions = torch.sigmoid(model(data))
+            logits = model(data)
+            predictions = torch.sigmoid(logits)
+            
             predictions = (predictions > 0.5).float()
             dice_score += dice_coeff(predictions, targets).item()
             
@@ -103,14 +130,12 @@ def main():
     
     print(f"Data Split: {train_size} Train | {val_size} Val")
     
-    # Pin_memory=True is good for GPU, num_workers=0 is safest for Windows
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
     
     # 2. Model & Optimizer
     model = get_model(args.model).to(DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scaler = torch.cuda.amp.GradScaler()
     
     # 3. Training Loop
     best_dice = 0.0
@@ -118,7 +143,7 @@ def main():
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
         
-        train_loss = train_fn(train_loader, model, optimizer, scaler)
+        train_loss = train_fn(train_loader, model, optimizer)
         val_dice = validate_fn(val_loader, model)
         
         print(f"Result: Train Loss: {train_loss:.4f} | Val Dice: {val_dice:.4f}")
