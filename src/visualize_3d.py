@@ -142,9 +142,9 @@ def visualize(vol, mask, pred, patient_id):
     x_min, x_max, y_min, y_max, z_min, z_max = brain_surf.bounds
     
     # Define a small margin (5%) to cut the flat edges created by the thresholding
-    clip_x_margin = (x_max - x_min) * 0.05
-    clip_y_margin = (y_max - y_min) * 0.05
-    clip_z_margin = (z_max - z_min) * 0.05
+    clip_x_margin = (x_max - x_min) * 0.12
+    clip_y_margin = (y_max - y_min) * 0.11
+    clip_z_margin = (z_max - z_min) * 0.11
 
     # Define the new, slightly smaller bounds box
     clipped_bounds = [
@@ -162,7 +162,7 @@ def visualize(vol, mask, pred, patient_id):
 
     # --- Fenster 1: Ground Truth ---
     p.subplot(0, 0)
-    p.add_text("Ground Truth (Arzt)", font_size=12)
+    p.add_text("Ground Truth", font_size=12)
     
     # 1. Brain
     p.add_mesh(brain_surf, 
@@ -177,7 +177,7 @@ def visualize(vol, mask, pred, patient_id):
 
     # --- Fenster 2: Prediction ---
     p.subplot(0, 1)
-    p.add_text(f"AI Prediction", font_size=12)
+    p.add_text(f"Prediction", font_size=12)
     
     # 1. Brain
     p.add_mesh(brain_surf, 

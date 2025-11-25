@@ -3,6 +3,7 @@ data/
 *.nii
 *.nii.gz
 *.zip
+*.mp4
 
 # Python / Environment
 venv/
@@ -16,4 +17,5 @@ __pycache__/
 
 # Training outputs
 checkpoints/
+trainings/
 *.pth
