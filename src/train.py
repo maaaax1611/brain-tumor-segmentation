@@ -4,12 +4,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F  # WICHTIG: Für die Loss-Funktion
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-# Imports
+from src.config import N_CHANNELS, N_CLASSES, PROCESSED_DIR, SPLIT_FILE, CHECKPOINT_DIR
 from src.dataset import BraTSDataset
+from src.metrics import evaluate_patients
 from src.models import UNet
+from src.splits import get_or_create_split
 
 # Global Device Setting
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -21,30 +23,27 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
-    parser.add_argument("--val_split", type=float, default=0.1, help="Fraction of data to use for validation")
+    parser.add_argument("--val_split", type=float, default=0.1, help="Fraction of PATIENTS used for validation")
+    parser.add_argument("--test_split", type=float, default=0.1, help="Fraction of PATIENTS held out for testing")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for the patient split")
+    parser.add_argument("--split_file", type=str, default=SPLIT_FILE, help="Patient split JSON (created if missing)")
+    parser.add_argument("--num_workers", type=int, default=4)
     
     # Model & Data
     parser.add_argument("--model", type=str, default="unet", choices=["unet", "transformer"], help="Model architecture")
-    parser.add_argument("--data_path", type=str, default=os.path.join('data', 'processed_slices'), help="Path to preprocessed .npy files")
-    parser.add_argument("--save_dir", type=str, default="checkpoints", help="Directory to save model checkpoints")
+    parser.add_argument("--data_path", type=str, default=PROCESSED_DIR, help="Path to preprocessed .npy files")
+    parser.add_argument("--save_dir", type=str, default=CHECKPOINT_DIR, help="Directory to save model checkpoints")
     
     return parser.parse_args()
 
 def get_model(model_name):
     """Factory function to get the correct model architecture."""
     if model_name == "unet":
-        return UNet(n_channels=2, n_classes=1)
+        return UNet(n_channels=N_CHANNELS, n_classes=N_CLASSES)
     elif model_name == "transformer":
         raise NotImplementedError("Transformer implementation coming soon!")
     else:
         raise ValueError(f"Unknown model type: {model_name}")
-
-def dice_coeff(pred, target):
-    smooth = 1.0
-    pred_flat = pred.view(-1)
-    target_flat = target.view(-1)
-    intersection = (pred_flat * target_flat).sum()
-    return (2. * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
 
 def criterion(logits, targets):
     """
@@ -96,23 +95,10 @@ def train_fn(loader, model, optimizer):
     if valid_batches == 0: return 0.0
     return epoch_loss / valid_batches
 
-def validate_fn(loader, model):
-    model.eval()
-    dice_score = 0
-    loop = tqdm(loader, desc="Val")
-    
-    with torch.no_grad():
-        for data, targets in loop:
-            data = data.to(DEVICE)
-            targets = targets.to(DEVICE)
-            
-            logits = model(data)
-            predictions = torch.sigmoid(logits)
-            
-            predictions = (predictions > 0.5).float()
-            dice_score += dice_coeff(predictions, targets).item()
-            
-    return dice_score / len(loader)
+def validate_fn(model, data_path, patient_ids):
+    """Mean whole-tumor Dice over validation PATIENTS, computed on full 3D volumes."""
+    scores = evaluate_patients(model, data_path, patient_ids, DEVICE)
+    return sum(scores.values()) / len(scores)
 
 def main():
     args = parse_args()
@@ -120,19 +106,16 @@ def main():
     print(f"--- Setup: Model={args.model} | Device={DEVICE} | Batch={args.batch_size} | LR={args.lr} ---")
     os.makedirs(args.save_dir, exist_ok=True)
     
-    # 1. Prepare Data
-    print(f"Loading data from: {args.data_path}")
-    full_dataset = BraTSDataset(args.data_path)
-    
-    train_size = int((1 - args.val_split) * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
-    
-    print(f"Data Split: {train_size} Train | {val_size} Val")
-    
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
-    
+    # 1. Prepare Data (patient-level split -> no slice leakage between sets)
+    split = get_or_create_split(args.data_path, args.split_file, args.val_split, args.test_split, args.seed)
+    train_ds = BraTSDataset(args.data_path, split["train"])
+    val_patients = split["val"]
+    print(f"Train: {len(train_ds)} slices | Val: {len(val_patients)} patients | "
+          f"Test (held out): {len(split['test'])} patients")
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                              num_workers=args.num_workers, pin_memory=True)
+
     # 2. Model & Optimizer
     model = get_model(args.model).to(DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -144,9 +127,9 @@ def main():
         print(f"\nEpoch {epoch+1}/{args.epochs}")
         
         train_loss = train_fn(train_loader, model, optimizer)
-        val_dice = validate_fn(val_loader, model)
+        val_dice = validate_fn(model, args.data_path, val_patients)
         
-        print(f"Result: Train Loss: {train_loss:.4f} | Val Dice: {val_dice:.4f}")
+        print(f"Result: Train Loss: {train_loss:.4f} | Val Dice (3D, per patient): {val_dice:.4f}")
         
         # Save Checks
         last_path = os.path.join(args.save_dir, "last_model.pth")
