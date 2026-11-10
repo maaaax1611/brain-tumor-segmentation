@@ -1,6 +1,6 @@
 """Evaluate a checkpoint on the held-out patients (default: test split).
 
-Reports whole-tumor Dice per patient on the full 3D volume and writes a CSV.
+Reports Dice per region (WT / TC / ET) per patient on the full 3D volume and writes a CSV.
 
     python -m src.evaluate --checkpoint checkpoints/best_model.pth --subset test
 """
@@ -11,7 +11,7 @@ import argparse
 import numpy as np
 import torch
 
-from src.config import N_CHANNELS, N_CLASSES, PROCESSED_DIR, SPLIT_FILE, CHECKPOINT_DIR
+from src.config import N_CHANNELS, N_CLASSES, REGION_NAMES, PROCESSED_DIR, SPLIT_FILE, CHECKPOINT_DIR
 from src.metrics import evaluate_patients
 from src.models import UNet
 from src.splits import load_split
@@ -33,21 +33,21 @@ def main():
     model.load_state_dict(torch.load(a.checkpoint, map_location=DEVICE))
 
     scores = evaluate_patients(model, a.data_path, patients, DEVICE)
-    vals = np.array(list(scores.values()))
 
-    print("-" * 40)
-    print(f"Whole-tumor Dice on {a.subset} ({len(vals)} patients)")
-    print(f"  mean   {vals.mean():.4f} ± {vals.std():.4f}")
-    print(f"  median {np.median(vals):.4f}")
-    print(f"  min    {vals.min():.4f}  ({min(scores, key=scores.get)})")
-    print("-" * 40)
+    print("-" * 56)
+    print(f"3D Dice on {a.subset} ({len(scores)} patients)")
+    print(f"  {'region':<8}{'mean':>8}{'std':>8}{'median':>8}{'min':>8}")
+    for name in REGION_NAMES:
+        vals = np.array([s[name] for s in scores.values()])
+        print(f"  {name:<8}{vals.mean():>8.4f}{vals.std():>8.4f}{np.median(vals):>8.4f}{vals.min():>8.4f}")
+    print("-" * 56)
 
     out_csv = a.out_csv or os.path.join(os.path.dirname(a.checkpoint) or ".", f"results_{a.subset}.csv")
     with open(out_csv, "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["patient_id", "dice_wt"])
+        w.writerow(["patient_id"] + [f"dice_{n.lower()}" for n in REGION_NAMES])
         for pid, d in sorted(scores.items()):
-            w.writerow([pid, f"{d:.4f}"])
+            w.writerow([pid] + [f"{d[n]:.4f}" for n in REGION_NAMES])
     print(f"Per-patient results written to {out_csv}")
 
 

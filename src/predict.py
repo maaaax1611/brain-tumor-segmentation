@@ -4,7 +4,8 @@ import numpy as np
 import os
 import random
 from src.config import N_CHANNELS, N_CLASSES, PROCESSED_DIR, SPLIT_FILE, CHECKPOINT_DIR, MODALITIES
-from src.dataset import BraTSDataset
+from matplotlib.colors import ListedColormap
+from src.dataset import BraTSDataset, regions_to_labelmap
 from src.models import UNet
 from src.splits import load_split
 
@@ -90,32 +91,29 @@ def predict_and_show():
     print("-" * 30)
 
     # 5. Visualization
-    # Move to CPU for plotting
-    img_numpy = image[0].cpu().numpy() # Channel 0 = FLAIR (see MODALITIES)
-    mask_numpy = mask[0].cpu().numpy()
-    prob_numpy = pred_prob[0, 0].cpu().numpy() # Show the raw probability map
-    pred_numpy = pred_mask[0, 0].cpu().numpy() # Show the binary result
+    img_numpy = image[0].cpu().numpy()                     # channel 0 = FLAIR (see MODALITIES)
+    gt_labels = regions_to_labelmap(mask.cpu().numpy())    # 0 bg, 1 edema, 2 core, 3 enhancing
+    pred_labels = regions_to_labelmap(pred_mask[0].cpu().numpy())
+    prob_numpy = pred_prob[0, 0].cpu().numpy()             # whole-tumor probability
 
+    cmap = ListedColormap(["black", "#2ecc71", "#3498db", "#e74c3c"])
     fig, ax = plt.subplots(1, 4, figsize=(20, 5))
-    
+
     ax[0].imshow(img_numpy, cmap='gray')
     ax[0].set_title("Input (FLAIR)")
-    ax[0].axis('off')
-    
-    ax[1].imshow(mask_numpy, cmap='gray')
+
+    ax[1].imshow(gt_labels, cmap=cmap, vmin=0, vmax=3, interpolation='nearest')
     ax[1].set_title("Ground Truth")
-    ax[1].axis('off')
-    
-    # Visualizing the 'Heatmap' (Confidence)
+
     im2 = ax[2].imshow(prob_numpy, cmap='jet', vmin=0, vmax=1)
-    ax[2].set_title(f"Model Confidence\n(Max: {max_val:.4f})")
-    ax[2].axis('off')
+    ax[2].set_title(f"Whole-Tumor Confidence\n(Max: {pred_prob[0, 0].max().item():.4f})")
     plt.colorbar(im2, ax=ax[2], fraction=0.046, pad=0.04)
-    
-    ax[3].imshow(pred_numpy, cmap='gray')
-    ax[3].set_title("Binary Prediction (> 0.5)")
-    ax[3].axis('off')
-    
+
+    ax[3].imshow(pred_labels, cmap=cmap, vmin=0, vmax=3, interpolation='nearest')
+    ax[3].set_title("Prediction\ngreen: edema | blue: core | red: enhancing")
+
+    for a_ in ax:
+        a_.axis('off')
     plt.tight_layout()
     plt.show()
 
