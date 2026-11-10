@@ -7,6 +7,31 @@ import torch
 from torch.utils.data import Dataset
 
 
+from src.config import REGIONS
+
+
+def labels_to_regions(labels):
+    """BraTS label map (..., H, W) -> float region masks (..., R, H, W), R = WT, TC, ET."""
+    return np.stack([np.isin(labels, ids) for ids in REGIONS.values()], axis=-3).astype(np.float32)
+
+
+def regions_to_labelmap(regions):
+    """Region masks (..., R, H, W) -> display label map (..., H, W).
+
+    0 = background, 1 = edema (WT only), 2 = non-enhancing / necrotic core
+    (TC without ET), 3 = enhancing tumor. Enforces the nesting ET ⊆ TC ⊆ WT,
+    which independent sigmoid outputs do not guarantee.
+    """
+    wt, tc, et = (np.take(regions, i, axis=-3) > 0.5 for i in range(3))
+    tc = tc & wt
+    et = et & tc
+    out = np.zeros(wt.shape, dtype=np.uint8)
+    out[wt] = 1
+    out[tc] = 2
+    out[et] = 3
+    return out
+
+
 def parse_slice_filename(path):
     """'BraTS19_2013_10_1_075_img.npy' -> ('BraTS19_2013_10_1', 75)."""
     stem = os.path.basename(path)[: -len("_img.npy")]
@@ -52,17 +77,17 @@ class BraTSDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.image_files[idx]
         image = np.load(img_path)                                   # (C, H, W)
-        mask = np.load(img_path.replace("_img.npy", "_mask.npy"))   # (1, H, W)
-        return torch.from_numpy(image).float(), torch.from_numpy(mask).float()
+        labels = np.load(img_path.replace("_img.npy", "_mask.npy"))  # (1, H, W) label map
+        return torch.from_numpy(image).float(), torch.from_numpy(labels_to_regions(labels[0]))
 
 
 def load_patient_volume(processed_dir, patient_id, index=None):
-    """Stack all slices of one patient -> image (D, C, H, W), mask (D, 1, H, W)."""
+    """Stack all slices of one patient -> image (D, C, H, W), region masks (D, R, H, W)."""
     if index is None:
         index = index_slices(processed_dir)
     files = index.get(patient_id)
     if not files:
         raise ValueError(f"No slices found for patient {patient_id}")
     imgs = np.stack([np.load(f) for f in files])
-    masks = np.stack([np.load(f.replace("_img.npy", "_mask.npy")) for f in files])
-    return imgs, masks
+    labels = np.stack([np.load(f.replace("_img.npy", "_mask.npy"))[0] for f in files])
+    return imgs, labels_to_regions(labels)

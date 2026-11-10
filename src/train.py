@@ -9,7 +9,7 @@ from tqdm import tqdm
 
 from src.config import N_CHANNELS, N_CLASSES, PROCESSED_DIR, SPLIT_FILE, CHECKPOINT_DIR
 from src.dataset import BraTSDataset
-from src.metrics import evaluate_patients
+from src.metrics import evaluate_patients, mean_per_region
 from src.models import UNet
 from src.splits import get_or_create_split
 
@@ -45,24 +45,22 @@ def get_model(model_name):
     else:
         raise ValueError(f"Unknown model type: {model_name}")
 
-def criterion(logits, targets):
+def criterion(logits, targets, dice_weight=5.0):
     """
-    Combined BCE + Dice Loss.
+    Combined BCE + Dice loss over the region channels (WT, TC, ET).
     Takes RAW LOGITS (before sigmoid) for better numerical stability.
+    Dice is computed per region over the batch and then averaged, so the small
+    regions (enhancing tumor) weigh as much as the whole tumor.
     """
     bce = F.binary_cross_entropy_with_logits(logits, targets)
-    
+
     probs = torch.sigmoid(logits)
     smooth = 1.0
-    
-    probs_flat = probs.view(-1)
-    targets_flat = targets.view(-1)
-    intersection = (probs_flat * targets_flat).sum()
-    
-    dice_score = (2. * intersection + smooth) / (probs_flat.sum() + targets_flat.sum() + smooth)
-    dice_loss = 1 - dice_score
-    
-    return bce + (5.0 * dice_loss)
+    dims = (0, 2, 3)
+    intersection = (probs * targets).sum(dims)
+    dice = (2.0 * intersection + smooth) / (probs.sum(dims) + targets.sum(dims) + smooth)
+
+    return bce + dice_weight * (1 - dice.mean())
 
 def train_fn(loader, model, optimizer):
     model.train()
@@ -96,9 +94,8 @@ def train_fn(loader, model, optimizer):
     return epoch_loss / valid_batches
 
 def validate_fn(model, data_path, patient_ids):
-    """Mean whole-tumor Dice over validation PATIENTS, computed on full 3D volumes."""
-    scores = evaluate_patients(model, data_path, patient_ids, DEVICE)
-    return sum(scores.values()) / len(scores)
+    """Mean Dice per region over validation PATIENTS, computed on full 3D volumes."""
+    return mean_per_region(evaluate_patients(model, data_path, patient_ids, DEVICE))
 
 def main():
     args = parse_args()
@@ -127,9 +124,11 @@ def main():
         print(f"\nEpoch {epoch+1}/{args.epochs}")
         
         train_loss = train_fn(train_loader, model, optimizer)
-        val_dice = validate_fn(model, args.data_path, val_patients)
-        
-        print(f"Result: Train Loss: {train_loss:.4f} | Val Dice (3D, per patient): {val_dice:.4f}")
+        val_regions = validate_fn(model, args.data_path, val_patients)
+        val_dice = sum(val_regions.values()) / len(val_regions)  # model selection: mean over regions
+
+        region_str = " | ".join(f"{k} {v:.4f}" for k, v in val_regions.items())
+        print(f"Result: Train Loss: {train_loss:.4f} | Val Dice (3D, per patient): {region_str} | mean {val_dice:.4f}")
         
         # Save Checks
         last_path = os.path.join(args.save_dir, "last_model.pth")

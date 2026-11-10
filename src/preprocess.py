@@ -57,7 +57,10 @@ def preprocess_dataset(root_dir, output_dir):
             seg_vol = nib.load(find_modality(patient_path, "seg")).get_fdata()
 
             image_vol = np.stack(vols, axis=0).astype(np.float32)  # (C, H, W, D)
-            mask_vol = (seg_vol > 0).astype(np.float32)             # whole tumor
+            # Keep the original BraTS label map (0, 1, 2, 4); the dataset turns
+            # it into region channels, so the target definition can change
+            # without re-running preprocessing.
+            mask_vol = np.rint(seg_vol).astype(np.uint8)
 
             for i in range(image_vol.shape[-1]):
                 save_name = f"{patient_id}_{i:03d}"
