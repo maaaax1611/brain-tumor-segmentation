@@ -1,4 +1,5 @@
 import os
+import argparse
 import torch
 import numpy as np
 import pyvista as pv
@@ -6,75 +7,27 @@ import glob
 from tqdm import tqdm
 from skimage import measure
 
-# Imports
+from src.config import N_CHANNELS, N_CLASSES, PROCESSED_DIR, SPLIT_FILE, CHECKPOINT_DIR
+from src.dataset import load_patient_volume
+from src.metrics import dice_3d, predict_volume as predict_volume_batched
 from src.models import UNet
+from src.splits import load_split
 
 # Settings
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DATA_DIR = os.path.join('data', 'processed_slices')
-CHECKPOINT = os.path.join('checkpoints', 'best_model.pth')
+DATA_DIR = PROCESSED_DIR
+CHECKPOINT = os.path.join(CHECKPOINT_DIR, 'best_model.pth')
 
 def load_volume(patient_id):
-    """
-    Load all slices of a patient and stack them to form a 3d volume.
-    """
+    """Stack all slices of a patient -> (D, C, H, W) image and (D, 1, H, W) mask."""
     print(f"Reconstructing 3D volume for Patient: {patient_id}...")
-    
-    # search for all files starting with the patient_id
-    # pattern: data/processed_slices/BraTS19_2013_10_1_075_img.npy
-    pattern = os.path.join(DATA_DIR, f"{patient_id}_*_img.npy")
-    files = glob.glob(pattern)
-    
-    if not files:
-        raise ValueError(f"No files found for patient {patient_id}")
-        
-    # arrange slices in the correct order (0..155)
-    files.sort()
-    
-    volume_slices = []
-    mask_slices = []
-    
-    for f in files:
-        # Load Image
-        img = np.load(f) # (2, 240, 240)
-        volume_slices.append(img)
-        
-        # Load Mask (Ground Truth) zum Vergleich
-        mask_f = f.replace("_img.npy", "_mask.npy")
-        mask = np.load(mask_f)
-        mask_slices.append(mask)
-        
-    # Stacken: 2D Arrays --> 3D NumPy Arrays
-    # Shape: (Slices, Channels, H, W) -> (155, 2, 240, 240)
-    vol_numpy = np.stack(volume_slices)
-    mask_numpy = np.stack(mask_slices)
-    
-    return vol_numpy, mask_numpy
+    return load_patient_volume(DATA_DIR, patient_id)
+
 
 def predict_volume(model, vol_numpy):
-    """
-    Pass volume through model (slice by slice)
-    """
+    """Slice-wise inference over the whole volume -> binary (D, H, W)."""
     print("Running Inference on 3D Volume...")
-    model.eval()
-    
-    predictions = []
-    
-    with torch.no_grad():
-        for i in tqdm(range(len(vol_numpy))):
-            # Prepare Slice
-            slice_img = vol_numpy[i] # (2, 240, 240)
-            tensor = torch.from_numpy(slice_img).float().unsqueeze(0).to(DEVICE) # (1, 2, 240, 240)
-            
-            # Predict
-            logits = model(tensor)
-            probs = torch.sigmoid(logits)
-            pred_mask = (probs > 0.5).float()
-            
-            # Save result (CPU)
-            predictions.append(pred_mask[0, 0].cpu().numpy())
-            
-    return np.stack(predictions) # (155, 240, 240)
+    return predict_volume_batched(model, vol_numpy, DEVICE)
 
 
 def clean_prediction(pred_vol):
@@ -223,20 +176,22 @@ def visualize(vol, mask, pred, patient_id):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--patient", default=None, help="Patient ID (default: first test patient)")
+    args = parser.parse_args()
+
     # 1. Load Model
-    model = UNet(n_channels=2, n_classes=1).to(DEVICE)
-    model.load_state_dict(torch.load(CHECKPOINT))
-    
-    # 2. Find a patient ID automatically
-    sample_file = glob.glob(os.path.join(DATA_DIR, "*_img.npy"))[3000]
-    filename = os.path.basename(sample_file)
-    parts = filename.split('_')
-    patient_id = "_".join(parts[:-2]) 
-    
+    model = UNet(n_channels=N_CHANNELS, n_classes=N_CLASSES).to(DEVICE)
+    model.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
+
+    # 2. Pick a held-out test patient so the visualization is not on training data
+    patient_id = args.patient or load_split(SPLIT_FILE)["test"][0]
+
     # 3. Run Pipeline
     vol, mask = load_volume(patient_id)
     pred = predict_volume(model, vol)
-    
+    print(f"Whole-tumor Dice for {patient_id}: {dice_3d(pred, mask[:, 0]):.4f}")
+
     visualize(vol, mask, pred, patient_id)
 
 if __name__ == "__main__":

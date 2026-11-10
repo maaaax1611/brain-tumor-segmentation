@@ -3,14 +3,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 import random
+from src.config import N_CHANNELS, N_CLASSES, PROCESSED_DIR, SPLIT_FILE, CHECKPOINT_DIR, MODALITIES
 from src.dataset import BraTSDataset
-
 from src.models import UNet
+from src.splits import load_split
 
 # --- SETTINGS ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DATA_PATH = os.path.join('data', 'processed_slices')
-CHECKPOINT_DIR = "checkpoints"
+DATA_PATH = PROCESSED_DIR
 
 # Try to load 'best_model.pth', fallback to 'last_model.pth'
 MODEL_PATH = os.path.join(CHECKPOINT_DIR, 'best_model.pth')
@@ -26,15 +26,16 @@ def predict_and_show():
         return
 
     # 1. Load Model
-    model = UNet(n_channels=2, n_classes=1).to(DEVICE)
+    model = UNet(n_channels=N_CHANNELS, n_classes=N_CLASSES).to(DEVICE)
     state_dict = torch.load(MODEL_PATH, map_location=DEVICE)
     model.load_state_dict(state_dict)
     
     model.eval() # CRITICAL: Turns off Dropout and Batchnorm adjustment
     #model.train() # just to experiment with BatchNorm vs. InstanceNorm
 
-    # 2. Load Dataset
-    ds = BraTSDataset(DATA_PATH)
+    # 2. Load Dataset (only held-out test patients, never seen during training)
+    test_patients = load_split(SPLIT_FILE)["test"] if os.path.exists(SPLIT_FILE) else None
+    ds = BraTSDataset(DATA_PATH, test_patients)
     
     # 3. Find a slice WITH a tumor
     # We loop until we find a mask that is not empty, so the visualization is interesting.
@@ -57,7 +58,7 @@ def predict_and_show():
     image, mask = ds[idx]
     
     # 4. Inference
-    input_tensor = image.unsqueeze(0).to(DEVICE) # Add batch dim: (1, 2, 240, 240)
+    input_tensor = image.unsqueeze(0).to(DEVICE) # Add batch dim: (1, C, 240, 240)
     
     with torch.no_grad():
         # Get RAW Logits first
@@ -90,7 +91,7 @@ def predict_and_show():
 
     # 5. Visualization
     # Move to CPU for plotting
-    img_numpy = image[0].cpu().numpy() # Show Channel 0 (FLAIR)
+    img_numpy = image[0].cpu().numpy() # Channel 0 = FLAIR (see MODALITIES)
     mask_numpy = mask[0].cpu().numpy()
     prob_numpy = pred_prob[0, 0].cpu().numpy() # Show the raw probability map
     pred_numpy = pred_mask[0, 0].cpu().numpy() # Show the binary result
